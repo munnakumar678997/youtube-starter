@@ -1,0 +1,20 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace "com.example.youtubestarter"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.youtubestarter"
+        minSdkVersion 21
+        targetSdkVersion 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
