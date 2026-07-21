@@ -1,12 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+  Root FrameLayout holds three layers:
+    1. mini_overlay  – semi-transparent dark background shown behind mini player
+    2. player_container – wrapper that shrinks/grows for mini ↔ full animation
+       └ WebView  – actual YouTube content
+       └ close_mini_btn – X button visible only in mini mode
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_layout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:background="#000000">
 
-    <WebView
-        android:id="@+id/webview"
+    <!-- Dark overlay visible when mini player is active -->
+    <View
+        android:id="@+id/mini_overlay"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        android:background="#B3000000"
+        android:visibility="gone" />
 
-</LinearLayout>
+    <!-- Player container: full-screen in normal mode, mini in pip mode -->
+    <FrameLayout
+        android:id="@+id/player_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <WebView
+            android:id="@+id/webview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- Close (X) button – top-right corner of mini player -->
+        <ImageButton
+            android:id="@+id/close_mini_btn"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="4dp"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:background="#CC000000"
+            android:padding="4dp"
+            android:visibility="gone"
+            android:contentDescription="Close mini player" />
+
+    </FrameLayout>
+
+</FrameLayout>
