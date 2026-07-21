@@ -1,62 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Layer order (bottom → top):
-  1. mini_overlay        – dark semi-transparent bg shown when mini player active
-  2. player_container    – animates scale+translate for mini ↔ full
-     a. webview          – actual YouTube content
-     b. mini_expand_overlay – transparent tap-catcher, GONE normally,
-                              VISIBLE in mini mode → tap = expand back
-     c. close_mini_btn   – × button, top-right, GONE normally
--->
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/root_layout"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:orientation="vertical">
 
-    <View
-        android:id="@+id/mini_overlay"
+    <WebView
+        android:id="@+id/webview"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="#B3000000"
-        android:visibility="gone" />
+        android:layout_height="match_parent" />
 
-    <FrameLayout
-        android:id="@+id/player_container"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent">
-
-        <WebView
-            android:id="@+id/webview"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="#000000" />
-
-        <!-- Transparent overlay: intercepts taps in mini mode to expand back.
-             Sits ABOVE the WebView so WebView doesn't steal the tap.
-             GONE in normal mode so WebView works freely. -->
-        <View
-            android:id="@+id/mini_expand_overlay"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="@android:color/transparent"
-            android:visibility="gone"
-            android:clickable="true"
-            android:focusable="true" />
-
-        <!-- × button on top of everything in mini mode -->
-        <ImageButton
-            android:id="@+id/close_mini_btn"
-            android:layout_width="30dp"
-            android:layout_height="30dp"
-            android:layout_gravity="top|end"
-            android:layout_margin="4dp"
-            android:src="@android:drawable/ic_menu_close_clear_cancel"
-            android:background="#CC000000"
-            android:padding="4dp"
-            android:visibility="gone"
-            android:contentDescription="Close mini player" />
-
-    </FrameLayout>
-
-</FrameLayout>
+</LinearLayout>
