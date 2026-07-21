@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.util.Rational;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
@@ -20,54 +21,76 @@ import android.widget.ImageButton;
 
 /**
  * ============================================================================
- *  YouTube Starter – WebView wrapper around m.youtube.com
+ *  YouTube Starter – WebView wrapper for m.youtube.com
  *
- *  FEATURES:
+ *  v3 FIXES:
  *  ─────────────────────────────────────────────────────────────────────────
- *  1. IN-APP MINI PLAYER  (swipe down while watching)
- *     • Swipe DOWN anywhere on screen → player shrinks to 240×135 dp
- *       anchored bottom-right (like YouTube's own mini player).
- *     • Tap mini player  → expands back to full screen.
- *     • Tap × button     → closes mini player.
+ *  MINI PLAYER:
+ *  • Before shrinking, webView.scrollTo(0,0) + JS scrollIntoView on the
+ *    <video> element → video is always visible at top of mini player.
+ *  • dispatchTouchEvent() for reliable swipe (WebView can't block it).
+ *  • mini_expand_overlay intercepts taps in mini mode → expand.
  *
- *     FIX vs v1: gesture detection moved to Activity.dispatchTouchEvent()
- *     so it fires BEFORE WebView can consume the touch.  A transparent
- *     mini_expand_overlay view (inside player_container) intercepts taps
- *     in mini mode without fighting the WebView.
- *
- *  2. SYSTEM PICTURE-IN-PICTURE  (Home button press)
- *     • Home button → Android system PiP (16:9 floating window).
- *     • Before entering PiP we scroll the WebView to y=0 so the video
- *       (always at the top of the page) is visible in the tiny window.
- *     • JS injection scrolls the page to the video element for good measure.
- *     • Requires Android 8.0+ (API 26); graceful no-op below that.
- *
- *  FIX vs v1: added hardwareAccelerated in manifest, scroll-to-top before
- *  PiP, and WebView background forced to black to kill the white flash.
+ *  SYSTEM PiP (Home button):
+ *  • First tries the Web API: video.requestPictureInPicture() via JS.
+ *    Chrome-based WebView supports this; video floats natively.
+ *  • Falls back to Activity-level PiP after 400 ms if JS PiP didn't fire.
+ *  • Before Activity PiP: scroll to y=0 so video is at top of tiny window.
+ *  • webView background = BLACK → no white flash.
  * ============================================================================
  */
 public class MainActivity extends Activity {
 
     // ── Views ──────────────────────────────────────────────────────────────
-    private WebView      webView;
-    private View         miniOverlay;         // dark bg layer
-    private FrameLayout  playerContainer;     // animates between full ↔ mini
-    private View         miniExpandOverlay;   // transparent tap-catcher in mini mode
-    private ImageButton  closeMiniBtn;
+    private WebView     webView;
+    private View        miniOverlay;
+    private FrameLayout playerContainer;
+    private View        miniExpandOverlay;
+    private ImageButton closeMiniBtn;
 
     // ── State ──────────────────────────────────────────────────────────────
-    private boolean isMiniPlayerActive = false;
+    private boolean isMiniPlayerActive  = false;
+    private boolean jsPipTriggered      = false;   // tracks if JS PiP fired
 
-    // ── Gesture detector (swipe-down) ─────────────────────────────────────
+    // ── Gesture detector ─────────────────────────────────────────────────
     private GestureDetector gestureDetector;
 
     // ── Constants ─────────────────────────────────────────────────────────
-    private static final int MINI_WIDTH_DP    = 240;
-    private static final int MINI_HEIGHT_DP   = 135;
-    private static final int MINI_MARGIN_DP   = 12;
-    private static final int ANIM_MS          = 300;
-    private static final int SWIPE_DIST_PX    = 100;   // min vertical distance
-    private static final int SWIPE_VEL_PX_S   = 100;   // min velocity
+    private static final int MINI_WIDTH_DP  = 240;
+    private static final int MINI_HEIGHT_DP = 135;
+    private static final int MINI_MARGIN_DP = 12;
+    private static final int ANIM_MS        = 300;
+    private static final int SWIPE_DIST_PX  = 100;
+    private static final int SWIPE_VEL_PX_S = 100;
+
+    // JS snippet: scroll the page so the <video> is at the top of the viewport
+    private static final String JS_SCROLL_TO_VIDEO =
+        "(function(){" +
+        "  var v=document.querySelector('video');" +
+        "  if(v){" +
+        "    v.scrollIntoView({behavior:'instant',block:'start'});" +
+        "    window.scrollBy(0,-80);" +   // small offset for YouTube's top bar
+        "  } else {" +
+        "    window.scrollTo(0,0);" +
+        "  }" +
+        "})()";
+
+    // JS snippet: ask the browser engine to put the video into native PiP.
+    // Chrome-based WebView supports video.requestPictureInPicture().
+    // Falls back to nothing silently if not supported / no video playing.
+    private static final String JS_REQUEST_PIP =
+        "(function(){" +
+        "  var v=document.querySelector('video');" +
+        "  if(v && !v.paused && document.pictureInPictureEnabled){" +
+        "    v.requestPictureInPicture()" +
+        "     .then(function(){window._pipOk=true;})" +
+        "     .catch(function(){window._pipOk=false;});" +
+        "  }" +
+        "})()";
+
+    // JS: read back whether JS PiP promise resolved
+    private static final String JS_CHECK_PIP =
+        "(function(){return String(!!window._pipOk);})()";
 
     // ─────────────────────────────────────────────────────────────────────
     //  LIFECYCLE
@@ -102,7 +125,7 @@ public class MainActivity extends Activity {
     // ─────────────────────────────────────────────────────────────────────
 
     private void setupWebView() {
-        webView.setBackgroundColor(Color.BLACK);   // prevent white flash in PiP
+        webView.setBackgroundColor(Color.BLACK);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -123,9 +146,7 @@ public class MainActivity extends Activity {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    //  GESTURE DETECTOR
-    //  KEY FIX: we hook dispatchTouchEvent() (Activity level) not a View's
-    //  OnTouchListener, so WebView can never swallow the gesture before us.
+    //  GESTURE  — uses dispatchTouchEvent so WebView never blocks it
     // ─────────────────────────────────────────────────────────────────────
 
     private void setupGestureDetector() {
@@ -137,7 +158,6 @@ public class MainActivity extends Activity {
                     if (e1 == null || e2 == null || isMiniPlayerActive) return false;
                     float dY = e2.getY() - e1.getY();
                     float dX = e2.getX() - e1.getX();
-                    // Downward swipe: dY big, Y-axis dominant, fast enough
                     if (dY > SWIPE_DIST_PX
                             && Math.abs(dY) > Math.abs(dX) * 1.2f
                             && velY > SWIPE_VEL_PX_S) {
@@ -149,18 +169,11 @@ public class MainActivity extends Activity {
             });
     }
 
-    /**
-     * Activity-level touch dispatch — fires before ANY child view.
-     * We feed every event to the GestureDetector (for swipe-down detection)
-     * while still forwarding to the view hierarchy via super.
-     */
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (!isMiniPlayerActive) {
-            // Normal mode: detect swipe-down; let WebView handle everything else
             gestureDetector.onTouchEvent(event);
         }
-        // Always call super so views (WebView, buttons) receive their events
         return super.dispatchTouchEvent(event);
     }
 
@@ -169,11 +182,7 @@ public class MainActivity extends Activity {
     // ─────────────────────────────────────────────────────────────────────
 
     private void setupMiniPlayerControls() {
-        // Transparent overlay inside playerContainer — tap anywhere on mini
-        // player to expand back. Active only when mini mode is on.
         miniExpandOverlay.setOnClickListener(v -> exitMiniPlayer());
-
-        // × button closes the mini player
         closeMiniBtn.setOnClickListener(v -> exitMiniPlayer());
     }
 
@@ -184,39 +193,37 @@ public class MainActivity extends Activity {
     private void enterMiniPlayer() {
         isMiniPlayerActive = true;
 
+        // ── FIX: scroll to video BEFORE shrinking so video is visible ─────
+        webView.scrollTo(0, 0);
+        webView.evaluateJavascript(JS_SCROLL_TO_VIDEO, null);
+
         float density = getResources().getDisplayMetrics().density;
         int screenW   = getResources().getDisplayMetrics().widthPixels;
         int screenH   = getResources().getDisplayMetrics().heightPixels;
+        int miniW     = (int)(MINI_WIDTH_DP  * density);
+        int miniH     = (int)(MINI_HEIGHT_DP * density);
+        int margin    = (int)(MINI_MARGIN_DP * density);
 
-        int miniW  = (int)(MINI_WIDTH_DP  * density);
-        int miniH  = (int)(MINI_HEIGHT_DP * density);
-        int margin = (int)(MINI_MARGIN_DP * density);
-
-        // Scale factors: pivot = bottom-right corner → shrinks into corner
         float scaleX = (float) miniW / screenW;
         float scaleY = (float) miniH / screenH;
 
+        // Pivot bottom-right → container shrinks into bottom-right corner
         playerContainer.setPivotX(screenW);
         playerContainer.setPivotY(screenH);
 
-        // Shift inward so there's a margin from the screen edge
-        float tx = -margin;
-        float ty = -margin;
-
-        // Show dark overlay
+        // Show dark background
         miniOverlay.setAlpha(0f);
         miniOverlay.setVisibility(View.VISIBLE);
         miniOverlay.animate().alpha(1f).setDuration(ANIM_MS).start();
 
-        // Shrink playerContainer to bottom-right
+        // Shrink animation — small inward margin from screen edge
         playerContainer.animate()
             .scaleX(scaleX)
             .scaleY(scaleY)
-            .translationX(tx)
-            .translationY(ty)
+            .translationX(-margin)
+            .translationY(-margin)
             .setDuration(ANIM_MS)
             .withEndAction(() -> {
-                // Enable tap-to-expand overlay and show × button
                 miniExpandOverlay.setVisibility(View.VISIBLE);
                 closeMiniBtn.setVisibility(View.VISIBLE);
             })
@@ -229,30 +236,29 @@ public class MainActivity extends Activity {
 
     private void exitMiniPlayer() {
         isMiniPlayerActive = false;
-
-        // Hide controls immediately so they don't flash during animation
         miniExpandOverlay.setVisibility(View.GONE);
         closeMiniBtn.setVisibility(View.GONE);
 
-        // Fade out dark bg
         miniOverlay.animate()
-            .alpha(0f)
-            .setDuration(ANIM_MS)
+            .alpha(0f).setDuration(ANIM_MS)
             .withEndAction(() -> miniOverlay.setVisibility(View.GONE))
             .start();
 
-        // Expand back to full screen
         playerContainer.animate()
-            .scaleX(1f)
-            .scaleY(1f)
-            .translationX(0f)
-            .translationY(0f)
+            .scaleX(1f).scaleY(1f)
+            .translationX(0f).translationY(0f)
             .setDuration(ANIM_MS)
             .start();
     }
 
     // ─────────────────────────────────────────────────────────────────────
     //  SYSTEM PiP  (Home button)
+    //
+    //  Strategy:
+    //  1. Try JS PiP (video.requestPictureInPicture) — best result: only
+    //     the video floats, powered by the browser engine.
+    //  2. After 400 ms check if JS PiP worked. If NOT, fall back to
+    //     Activity-level PiP (whole app window shrinks).
     // ─────────────────────────────────────────────────────────────────────
 
     @Override
@@ -263,19 +269,35 @@ public class MainActivity extends Activity {
 
     private void enterSystemPiP() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+
+        // Reset flag
+        jsPipTriggered = false;
+
+        // Step 1 — try the Web PiP API on the video element
+        webView.evaluateJavascript(JS_REQUEST_PIP, null);
+
+        // Step 2 — after a short delay, check if JS PiP actually fired.
+        // If not, use Activity-level PiP as fallback.
+        new Handler(getMainLooper()).postDelayed(() -> {
+            webView.evaluateJavascript(JS_CHECK_PIP, value -> {
+                boolean jsWorked = ""true"".equals(value) || "true".equals(value);
+                if (!jsWorked) {
+                    // JS PiP didn't work → Activity-level PiP fallback
+                    runOnUiThread(() -> enterActivityPiP());
+                }
+                // else: JS PiP is showing the video — nothing more to do
+            });
+        }, 400);
+    }
+
+    private void enterActivityPiP() {
         if (!getPackageManager().hasSystemFeature(
                 PackageManager.FEATURE_PICTURE_IN_PICTURE)) return;
 
-        // ── FIX: scroll WebView to top so video (always at top of page) ──
-        // is visible in the tiny PiP window, not the comments section.
+        // Scroll to top so the video is at the top of the tiny PiP window
         webView.scrollTo(0, 0);
-        webView.evaluateJavascript(
-            "(function(){" +
-            "  var v=document.querySelector('video');" +
-            "  if(v){v.scrollIntoView({behavior:'instant',block:'start'});}" +
-            "})()", null);
+        webView.evaluateJavascript(JS_SCROLL_TO_VIDEO, null);
 
-        // Close in-app mini player first if active
         if (isMiniPlayerActive) exitMiniPlayer();
 
         PictureInPictureParams pip = new PictureInPictureParams.Builder()
@@ -288,12 +310,10 @@ public class MainActivity extends Activity {
     public void onPictureInPictureModeChanged(boolean isInPiPMode) {
         super.onPictureInPictureModeChanged(isInPiPMode);
         if (isInPiPMode) {
-            // PiP window is tiny — hide all overlays, show only the WebView
             miniExpandOverlay.setVisibility(View.GONE);
             closeMiniBtn.setVisibility(View.GONE);
             miniOverlay.setVisibility(View.GONE);
         } else {
-            // Returning to full screen — reset any leftover transform
             isMiniPlayerActive = false;
             playerContainer.setScaleX(1f);
             playerContainer.setScaleY(1f);
@@ -308,14 +328,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (isMiniPlayerActive) {
-            exitMiniPlayer();
-            return;
-        }
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (isMiniPlayerActive) { exitMiniPlayer(); return; }
+        if (webView.canGoBack()) { webView.goBack(); }
+        else { super.onBackPressed(); }
     }
 }
